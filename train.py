@@ -10,18 +10,20 @@ import torchvision.transforms as transforms
 import torchvision.transforms.functional as TF
 from pathlib import Path
 from torch import optim
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import DataLoader, random_split, Subset
 from tqdm import tqdm
+from torch.utils.tensorboard import SummaryWriter #tensorboard import
+from datetime import datetime #tensorboard import
 
 import wandb
-from evaluate import evaluate
+from evaluate import evaluate_depth #using evaluate_depth now
 from unet import UNet
 from utils.data_loading import BasicDataset, CarvanaDataset
 from utils.dice_score import dice_loss
 
-dir_img = Path('./data/imgs/')
-dir_mask = Path('./data/masks/')
-dir_checkpoint = Path('./checkpoints/')
+dir_img = Path('./depth_dataset/images/')
+dir_mask = Path('./depth_dataset/gt/')
+dir_checkpoint = Path('./checkpoints/')   # (or wherever you want)
 
 
 def train_model(
@@ -38,11 +40,19 @@ def train_model(
         momentum: float = 0.999,
         gradient_clipping: float = 1.0,
 ):
+    ''' CARVANA DATASET MAKES NO SENSE FOR DEPTH
     # 1. Create dataset
-    try:
+    try: #not even using the carvana dataset so this shouldn't matter
         dataset = CarvanaDataset(dir_img, dir_mask, img_scale)
+        
+        CHANGED SO ONE EPOCH DOESN'T TAKE SO LONG ON MY COMPUTER, CAN CHANGE BACK
+        
+        dataset = Subset(dataset, range(1000))  # 1000 images only
     except (AssertionError, RuntimeError, IndexError):
         dataset = BasicDataset(dir_img, dir_mask, img_scale)
+    '''
+    dataset = BasicDataset(dir_img, dir_mask, img_scale)
+    #dataset = Subset(dataset, range(1000))
 
     # 2. Split into train / validation partitions
     n_val = int(len(dataset) * val_percent)
@@ -50,12 +60,27 @@ def train_model(
     train_set, val_set = random_split(dataset, [n_train, n_val], generator=torch.Generator().manual_seed(0))
 
     # 3. Create data loaders
-    loader_args = dict(batch_size=batch_size, num_workers=os.cpu_count(), pin_memory=True)
+    pin_memory = (device.type == 'cuda') #pin_memory = true good for CUDA
+    num_workers = 2 if device.type == 'cuda' else 0
+
+    loader_args = dict(
+        batch_size=batch_size,
+        num_workers=num_workers,
+        pin_memory=pin_memory
+    )
     train_loader = DataLoader(train_set, shuffle=True, **loader_args)
     val_loader = DataLoader(val_set, shuffle=False, drop_last=True, **loader_args)
 
+    '''
+    ADDITION FOR TENSORBOARD
+    '''
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    run_name = f"unet_lr{learning_rate}_bs{batch_size}_{timestamp}"
+    writer = SummaryWriter(log_dir=f"runs/{run_name}")
+
     # (Initialize logging)
     experiment = wandb.init(project='U-Net', resume='allow', anonymous='must')
+ 
     experiment.config.update(
         dict(epochs=epochs, batch_size=batch_size, learning_rate=learning_rate,
              val_percent=val_percent, save_checkpoint=save_checkpoint, img_scale=img_scale, amp=amp)
@@ -74,11 +99,16 @@ def train_model(
     ''')
 
     # 4. Set up the optimizer, the loss, the learning rate scheduler and the loss scaling for AMP
-    optimizer = optim.RMSprop(model.parameters(),
-                              lr=learning_rate, weight_decay=weight_decay, momentum=momentum, foreach=True)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'max', patience=5)  # goal: maximize Dice score
-    grad_scaler = torch.cuda.amp.GradScaler(enabled=amp)
-    criterion = nn.CrossEntropyLoss() if model.n_classes > 1 else nn.BCEWithLogitsLoss()
+    optimizer = optim.AdamW(model.parameters(),
+                              lr=learning_rate, weight_decay=weight_decay, foreach=True)
+    #scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'max', patience=5)  # goal: maximize Dice score
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', patience=5) #we aren't using DICE score anymore, so use min of loss instead
+    #grad_scaler = torch.cuda.amp.GradScaler(enabled=amp)
+    # No AMP for now (consistent behavior everywhere)
+    grad_scaler = None
+    '''CROSS ENTROPY LOSS MAKES NO SENSE TO USE ANYMORE'''
+    #criterion = nn.CrossEntropyLoss() if model.n_classes > 1 else nn.BCEWithLogitsLoss()
+    criterion = nn.SmoothL1Loss()
     global_step = 0
 
     # 5. Begin training
@@ -86,36 +116,116 @@ def train_model(
         model.train()
         epoch_loss = 0
         with tqdm(total=n_train, desc=f'Epoch {epoch}/{epochs}', unit='img') as pbar:
+            accum = 8
+            optimizer.zero_grad(set_to_none=True)
+            
             for batch in train_loader:
-                images, true_masks = batch['image'], batch['mask']
+                #images, true_masks = batch['image'], batch['mask'] CHANGED TO BELOW
+                images, true_depth = batch['image'], batch['depth']
+                #DEPTH DEBUGGING ADDITION
+                #print(true_depth.min(), true_depth.max()) OR MAYBE NOT ..
 
                 assert images.shape[1] == model.n_channels, \
                     f'Network has been defined with {model.n_channels} input channels, ' \
                     f'but loaded images have {images.shape[1]} channels. Please check that ' \
                     'the images are loaded correctly.'
+                '''
+                MAC CHANGE
+                '''
+                #images = images.to(device=device, dtype=torch.float32, memory_format=torch.channels_last) CHANGING
+                images = images.to(device=device, dtype=torch.float32) #CHANGED
+                #true_masks = true_masks.to(device=device, dtype=torch.long) CHANGED TO BELOW
+                true_depth = true_depth.to(device=device, dtype=torch.float32)
 
-                images = images.to(device=device, dtype=torch.float32, memory_format=torch.channels_last)
-                true_masks = true_masks.to(device=device, dtype=torch.long)
 
+                '''WHOLE SECTION CHANGED, REFERENCES TO MASK CHANGED TO TRUE_DEPTH, USES SIGMOID
                 with torch.autocast(device.type if device.type != 'mps' else 'cpu', enabled=amp):
-                    masks_pred = model(images)
+                    pred = torch.sigmoid(model(images)) #uses sigmoid activation
                     if model.n_classes == 1:
-                        loss = criterion(masks_pred.squeeze(1), true_masks.float())
-                        loss += dice_loss(F.sigmoid(masks_pred.squeeze(1)), true_masks.float(), multiclass=False)
-                    else:
-                        loss = criterion(masks_pred, true_masks)
+                        loss = criterion(pred, true_depth)
+                        #loss += dice_loss(F.sigmoid(masks_pred.squeeze(1)), true_masks.float(), multiclass=False)
+                    else: #shouldn't be triggered anyway .. wouldn't worry about it for now
+                        loss = criterion(pred, true_depth)
                         loss += dice_loss(
-                            F.softmax(masks_pred, dim=1).float(),
-                            F.one_hot(true_masks, model.n_classes).permute(0, 3, 1, 2).float(),
+                            F.softmax(pred, dim=1).float(),
+                            F.one_hot(true_depth, model.n_classes).permute(0, 3, 1, 2).float(),
                             multiclass=True
                         )
+                    '''
+                #or actually don't even need that entier structure, classes should NEVER be more than 1
+                with torch.autocast(device.type if device.type != 'mps' else 'cpu', enabled=amp):
+                    pred = model(images)
 
+                    valid = (true_depth > 0)  # ignore zero pixels
+
+                    loss_map = F.smooth_l1_loss(pred, true_depth, reduction='none')
+                    loss = (loss_map * valid).sum() / (valid.sum() + 1e-8)
+
+                ''' MAC CHANGE, MAKE EVERYTHING NO GRAD_SCALER
                 optimizer.zero_grad(set_to_none=True)
                 grad_scaler.scale(loss).backward()
                 grad_scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), gradient_clipping)
                 grad_scaler.step(optimizer)
                 grad_scaler.update()
+                '''
+                #EVERYTHING BELOW IS WITH GRADSCALER
+                #optimizer.zero_grad(set_to_none=True)
+                loss = loss / accum
+                loss.backward()
+                ''' HUGE BLOCK TO LOG GRADIENTS ONTO TENSORBOARD AND VERIFY IF THEY'RE BIG OR SMALL'''
+                # ---- GRADIENT DIAGNOSTICS (drop-in) ----
+                import math
+
+                total_norm_sq = 0.0
+                max_abs_grad = 0.0
+                nonfinite_count = 0
+                zero_count = 0
+                total_count = 0
+
+                for p in model.parameters():
+                    if p.grad is None:
+                        continue
+                    g = p.grad.detach()
+
+                    # Count non-finite grads (NaN/Inf)
+                    nonfinite_count += (~torch.isfinite(g)).sum().item()
+
+                    # Global L2 norm and max abs grad
+                    total_norm_sq += g.float().pow(2).sum().item()
+                    max_abs_grad = max(max_abs_grad, g.float().abs().max().item())
+
+                    # How many exact zeros (useful for spotting underflow / dead grads)
+                    zero_count += (g == 0).sum().item()
+                    total_count += g.numel()
+
+                total_grad_norm = math.sqrt(total_norm_sq)
+                zero_fraction = (zero_count / total_count) if total_count > 0 else 0.0
+
+                writer.add_scalar("grad/total_norm", total_grad_norm, global_step)
+                writer.add_scalar("grad/max_abs", max_abs_grad, global_step)
+                writer.add_scalar("grad/zero_fraction", zero_fraction, global_step)
+                writer.add_scalar("grad/nonfinite_count", nonfinite_count, global_step)
+
+                if global_step % 50 == 0:
+                    writer.flush()
+
+                # If you want the same metrics in wandb too:
+                experiment.log({
+                    "grad/total_norm": total_grad_norm,
+                    "grad/max_abs": max_abs_grad,
+                    "grad/zero_fraction": zero_fraction,
+                    "grad/nonfinite_count": nonfinite_count,
+                    "step": global_step,
+                    "epoch": epoch,
+                })
+                # ---- END GRADIENT DIAGNOSTICS ----
+                '''END OF GRADIENT LOGGING'''
+
+                if (global_step + 1) % accum == 0:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), gradient_clipping)
+                    optimizer.step()
+                    optimizer.zero_grad(set_to_none=True)
 
                 pbar.update(images.shape[0])
                 global_step += 1
@@ -125,12 +235,18 @@ def train_model(
                     'step': global_step,
                     'epoch': epoch
                 })
+                '''
+                TENSORBOARD ADDITION
+                '''
+                writer.add_scalar('Loss/train', loss.item(), global_step) #tensorboard training loss
+
                 pbar.set_postfix(**{'loss (batch)': loss.item()})
 
                 # Evaluation round
                 division_step = (n_train // (5 * batch_size))
                 if division_step > 0:
                     if global_step % division_step == 0:
+                        '''
                         histograms = {}
                         for tag, value in model.named_parameters():
                             tag = tag.replace('/', '.')
@@ -138,10 +254,27 @@ def train_model(
                                 histograms['Weights/' + tag] = wandb.Histogram(value.data.cpu())
                             if not (torch.isinf(value.grad) | torch.isnan(value.grad)).any():
                                 histograms['Gradients/' + tag] = wandb.Histogram(value.grad.data.cpu())
+                        '''
+                        val_loss = evaluate_depth(model, val_loader, device, amp, criterion)
 
-                        val_score = evaluate(model, val_loader, device, amp)
-                        scheduler.step(val_score)
+                        '''
+                        TENSORBOARD ADDITION
+                        '''
+                        #writer.add_scalar('Dice/val', val_score, global_step)#tensorboard
+                        writer.add_scalar('Loss/val', val_loss, global_step)
+                        writer.add_scalar('LR', optimizer.param_groups[0]['lr'], global_step) #tensorboard
+                        scheduler.step(val_loss) #schedule LR based on the validation loss
 
+                        # pred and true_depth are [B,1,H,W] in [0,1]
+                        pred_vis = pred[0]                       # [1,H,W]
+                        true_vis = true_depth[0]                 # [1,H,W]
+                        err_vis  = (pred_vis - true_vis).abs()   # [1,H,W]
+
+                        writer.add_image('Depth/true', true_vis, global_step)
+                        writer.add_image('Depth/pred', pred_vis, global_step)
+                        writer.add_image('Depth/abs_error', err_vis, global_step)
+
+                        ''' CAN'T USE ANYMORE, change wandb stuff later
                         logging.info('Validation Dice score: {}'.format(val_score))
                         try:
                             experiment.log({
@@ -158,14 +291,24 @@ def train_model(
                             })
                         except:
                             pass
+                        '''
+
 
         if save_checkpoint:
             Path(dir_checkpoint).mkdir(parents=True, exist_ok=True)
             state_dict = model.state_dict()
-            state_dict['mask_values'] = dataset.mask_values
+            '''
+            CHANGED FOR SUBSET REASONS
+            '''
+            #state_dict['mask_values'] = dataset.mask_values 
+            base_ds = dataset.dataset if isinstance(dataset, Subset) else dataset #changed
+            '''DON'T HAVE MASK VALUES ANYMORE'''
+            # state_dict['mask_values'] = base_ds.mask_values #changed
             torch.save(state_dict, str(dir_checkpoint / 'checkpoint_epoch{}.pth'.format(epoch)))
+            logging.info(f"Epoch {epoch} avg loss: {epoch_loss / len(train_loader)}")
             logging.info(f'Checkpoint {epoch} saved!')
-
+    
+    writer.close()        
 
 def get_args():
     parser = argparse.ArgumentParser(description='Train the UNet on images and target masks')
@@ -179,7 +322,8 @@ def get_args():
                         help='Percent of the data that is used as validation (0-100)')
     parser.add_argument('--amp', action='store_true', default=False, help='Use mixed precision')
     parser.add_argument('--bilinear', action='store_true', default=False, help='Use bilinear upsampling')
-    parser.add_argument('--classes', '-c', type=int, default=2, help='Number of classes')
+    '''Make default number of classes 1 for depth estimation'''
+    parser.add_argument('--classes', '-c', type=int, default=1, help='Number of classes')
 
     return parser.parse_args()
 
@@ -188,14 +332,26 @@ if __name__ == '__main__':
     args = get_args()
 
     logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    #CHANGING
+    #device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    #device = torch.device('mps' if torch.backends.mps.is_available() else
+    #                  'cuda' if torch.cuda.is_available() else 'cpu')
+    if torch.cuda.is_available():
+        device = torch.device('cuda')
+    elif torch.backends.mps.is_available():
+        device = torch.device('mps')
+    else:
+        device = torch.device('cpu')
     logging.info(f'Using device {device}')
 
     # Change here to adapt to your data
     # n_channels=3 for RGB images
     # n_classes is the number of probabilities you want to get per pixel
     model = UNet(n_channels=3, n_classes=args.classes, bilinear=args.bilinear)
-    model = model.to(memory_format=torch.channels_last)
+    '''
+    CHANGE FOR MAC
+    '''
+    #model = model.to(memory_format=torch.channels_last) COMMENTING OUT FOR MAC
 
     logging.info(f'Network:\n'
                  f'\t{model.n_channels} input channels\n'
@@ -204,7 +360,7 @@ if __name__ == '__main__':
 
     if args.load:
         state_dict = torch.load(args.load, map_location=device)
-        del state_dict['mask_values']
+        state_dict.pop('mask_values', None)
         model.load_state_dict(state_dict)
         logging.info(f'Model loaded from {args.load}')
 

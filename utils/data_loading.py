@@ -46,8 +46,29 @@ class BasicDataset(Dataset):
         self.ids = [splitext(file)[0] for file in listdir(images_dir) if isfile(join(images_dir, file)) and not file.startswith('.')]
         if not self.ids:
             raise RuntimeError(f'No input file found in {images_dir}, make sure you put your images there')
+        
+        # keep only ids that have exactly one matching GT file
+        filtered = []
+        missing = 0
+        multiple = 0
+
+        for _id in self.ids:
+            matches = list(self.mask_dir.glob(_id + self.mask_suffix + '.*'))
+            if len(matches) == 1:
+                filtered.append(_id)
+            elif len(matches) == 0:
+                missing += 1
+            else:
+                multiple += 1
+
+        if missing or multiple:
+            logging.warning(f"Filtered dataset: missing_gt={missing}, multiple_gt={multiple}")
+
+        self.ids = filtered
+        logging.info(f"Final paired examples: {len(self.ids)}")
 
         logging.info(f'Creating dataset with {len(self.ids)} examples')
+        '''
         logging.info('Scanning mask files to determine unique values')
         with Pool() as p:
             unique = list(tqdm(
@@ -57,10 +78,12 @@ class BasicDataset(Dataset):
 
         self.mask_values = list(sorted(np.unique(np.concatenate(unique), axis=0).tolist()))
         logging.info(f'Unique mask values: {self.mask_values}')
+        '''
 
     def __len__(self):
         return len(self.ids)
 
+    '''CHANGE PREPROCESSING FOR OUR DEPTH USE (NO MASK and stuff)
     @staticmethod
     def preprocess(mask_values, pil_img, scale, is_mask):
         w, h = pil_img.size
@@ -89,28 +112,77 @@ class BasicDataset(Dataset):
                 img = img / 255.0
 
             return img
+    '''
+
+    '''
+    OVERHAULED preprocess METHOD (getting image in right format, data type)
+    '''
+    @staticmethod
+    def preprocess(pil_img, scale, is_depth: bool):
+        w, h = pil_img.size
+        newW, newH = int(scale * w), int(scale * h)
+        assert newW > 0 and newH > 0, 'Scale is too small'
+
+        if is_depth:
+            # Force grayscale first (fixes '1' + 'P' modes)
+            pil_img = pil_img.convert('L')
+            pil_img = pil_img.resize((newW, newH), resample=Image.BILINEAR)
+
+            arr = np.asarray(pil_img, dtype=np.uint8)  # 0..255
+            # Debug (optional)
+            # print("DEPTH mode:", pil_img.mode, "min/max:", arr.min(), arr.max(), "unique:", np.unique(arr).size)
+
+            depth = arr.astype(np.float32) / 255.0     # [H,W] -> [0,1]
+            return depth[None, ...]                    # [1,H,W]
+
+        else:
+            pil_img = pil_img.resize((newW, newH), resample=Image.BICUBIC)
+            arr = np.asarray(pil_img)
+
+            if arr.ndim == 2:
+                arr = arr[np.newaxis, ...]
+            else:
+                arr = arr.transpose((2, 0, 1))
+
+            if (arr > 1).any():
+                arr = arr / 255.0
+
+            return arr.astype(np.float32)
 
     def __getitem__(self, idx):
         name = self.ids[idx]
         mask_file = list(self.mask_dir.glob(name + self.mask_suffix + '.*'))
         img_file = list(self.images_dir.glob(name + '.*'))
 
+        '''
+        CHANGE ASSERTS
+        
         assert len(img_file) == 1, f'Either no image or multiple images found for the ID {name}: {img_file}'
         assert len(mask_file) == 1, f'Either no mask or multiple masks found for the ID {name}: {mask_file}'
-        mask = load_image(mask_file[0])
+        '''
+        if len(img_file) != 1:
+            raise RuntimeError(f'Image issue for ID {name}: {img_file}')
+
+        if len(mask_file) != 1:
+            # Soft skip: pick a new random index instead of crashing a whole run
+            # (this can happen if there are a few broken pairs)
+            new_idx = np.random.randint(0, len(self.ids))
+            return self.__getitem__(new_idx)
+        depth = load_image(mask_file[0])
         img = load_image(img_file[0])
 
-        assert img.size == mask.size, \
-            f'Image and mask {name} should be the same size, but are {img.size} and {mask.size}'
+        assert img.size == depth.size, \
+            f'Image and mask {name} should be the same size, but are {img.size} and {depth.size}'
 
-        img = self.preprocess(self.mask_values, img, self.scale, is_mask=False)
-        mask = self.preprocess(self.mask_values, mask, self.scale, is_mask=True)
+
+        #MODIFIED BELOW TO MAKE IMAGES SUITABLE FOR DEPTH (FLOAT DEPTH PIXELS, ETC.)
+        img = self.preprocess(img, self.scale, is_depth=False)     # np float32 [3,H,W]
+        depth = self.preprocess(depth, self.scale, is_depth=True)  # np float32 [1,H,W]
 
         return {
-            'image': torch.as_tensor(img.copy()).float().contiguous(),
-            'mask': torch.as_tensor(mask.copy()).long().contiguous()
+            'image': torch.from_numpy(img).contiguous(),
+            'depth': torch.from_numpy(depth).contiguous()
         }
-
 
 class CarvanaDataset(BasicDataset):
     def __init__(self, images_dir, mask_dir, scale=1):

@@ -4,7 +4,7 @@ from tqdm import tqdm
 
 from utils.dice_score import multiclass_dice_coeff, dice_coeff
 
-
+''' NO LONGER USING DICE SCORE AT ALL
 @torch.inference_mode()
 def evaluate(net, dataloader, device, amp):
     net.eval()
@@ -38,3 +38,25 @@ def evaluate(net, dataloader, device, amp):
 
     net.train()
     return dice_score / max(num_val_batches, 1)
+'''
+
+#USING AVERAGE REGRESSION LOSS, SMOOTHL1 PIXEL BY PIXEL
+@torch.inference_mode()
+def evaluate_depth(model, dataloader, device, amp, criterion, max_batches=20): 
+    model.eval()
+    total = 0.0
+    n = 0
+    for i, batch in enumerate(dataloader):
+        if i >= max_batches:
+            break
+        images = batch['image'].to(device=device, dtype=torch.float32)
+        true_depth = batch['depth'].to(device=device, dtype=torch.float32)
+
+        with torch.autocast(device.type if device.type != 'mps' else 'cpu', enabled=amp):
+            pred = torch.sigmoid(model(images))
+            loss = criterion(pred, true_depth)
+
+        total += loss.item()
+        n += 1
+    model.train()
+    return total / max(n, 1)
