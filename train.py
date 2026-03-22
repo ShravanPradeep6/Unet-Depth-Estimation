@@ -140,7 +140,8 @@ def train_model(
     grad_scaler = None
     '''CROSS ENTROPY LOSS MAKES NO SENSE TO USE ANYMORE'''
     #criterion = nn.CrossEntropyLoss() if model.n_classes > 1 else nn.BCEWithLogitsLoss()
-    criterion = nn.SmoothL1Loss()
+    #criterion = nn.SmoothL1Loss()
+    criterion = nn.MSELoss()
     global_step = 0
 
     # 5. Begin training
