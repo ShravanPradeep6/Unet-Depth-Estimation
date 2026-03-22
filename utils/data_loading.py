@@ -205,8 +205,8 @@ class BasicDataset(Dataset):
         assert len(img_file) == 1, f'Either no image or multiple images found for the ID {name}: {img_file}'
         assert len(mask_file) == 1, f'Either no mask or multiple masks found for the ID {name}: {mask_file}'
         '''
-        if len(img_file) != 1:
-            raise RuntimeError(f'Image issue for ID {name}: {img_file}')
+        #if len(img_file) != 1:
+            #raise RuntimeError(f'Image issue for ID {name}: {img_file}')
 
         '''
         if len(mask_file) != 1:
