@@ -54,6 +54,40 @@ dir_img = base / 'images'
 dir_mask = base / 'gt'
 dir_checkpoint = PROJECT_ROOT / 'checkpoints'
 
+'''DEFINITIONS TO BE USED FOR LOSSES'''
+def gradient_x(img):
+    return img[:, :, :, :-1] - img[:, :, :, 1:]
+
+def gradient_y(img):
+    return img[:, :, :-1, :] - img[:, :, 1:, :]
+
+def gradient_loss(pred, target):
+    pred_dx = gradient_x(pred)
+    pred_dy = gradient_y(pred)
+
+    target_dx = gradient_x(target)
+    target_dy = gradient_y(target)
+
+    valid = (target > 0).float()
+
+    # gradient is valid only if both pixels involved are valid
+    valid_dx = valid[:, :, :, :-1] * valid[:, :, :, 1:]
+    valid_dy = valid[:, :, :-1, :] * valid[:, :, 1:, :]
+
+    loss_x = (torch.abs(pred_dx - target_dx) * valid_dx).sum() / (valid_dx.sum() + 1e-8)
+    loss_y = (torch.abs(pred_dy - target_dy) * valid_dy).sum() / (valid_dy.sum() + 1e-8)
+
+    return loss_x + loss_y
+def depth_loss(pred, true_depth):
+    valid = (true_depth > 0).float()
+
+    base_map = F.smooth_l1_loss(pred, true_depth, reduction='none')
+    base = (base_map * valid).sum() / (valid.sum() + 1e-8)
+
+    grad = gradient_loss(pred, true_depth)
+
+    return base + 0.1 * grad
+'''END OF DEFINITIONS USED FOR LOSSES'''
 
 def train_model(
         model,
@@ -141,8 +175,7 @@ def train_model(
     '''CROSS ENTROPY LOSS MAKES NO SENSE TO USE ANYMORE'''
     #criterion = nn.CrossEntropyLoss() if model.n_classes > 1 else nn.BCEWithLogitsLoss()
     #criterion = nn.SmoothL1Loss()
-    criterion = nn.MSELoss()
-    global_step = 0
+    '''loss section is all moved below now, makes more sense'''
 
     # 5. Begin training
     for epoch in range(1, epochs + 1):
@@ -187,12 +220,17 @@ def train_model(
                     '''
                 #or actually don't even need that entier structure, classes should NEVER be more than 1
                 with torch.autocast(device.type if device.type != 'mps' else 'cpu', enabled=amp):
+                    '''
                     pred = model(images)
 
                     valid = (true_depth > 0)  # ignore zero pixels
 
                     loss_map = F.smooth_l1_loss(pred, true_depth, reduction='none')
                     loss = (loss_map * valid).sum() / (valid.sum() + 1e-8)
+                    ''' #expanded upon in the function at top (depth_loss)
+
+                    pred = model(images)
+                    loss = depth_loss(pred, true_depth)
 
                 ''' MAC CHANGE, MAKE EVERYTHING NO GRAD_SCALER
                 optimizer.zero_grad(set_to_none=True)
@@ -292,7 +330,7 @@ def train_model(
                             if not (torch.isinf(value.grad) | torch.isnan(value.grad)).any():
                                 histograms['Gradients/' + tag] = wandb.Histogram(value.grad.data.cpu())
                         '''
-                        val_loss = evaluate_depth(model, val_loader, device, amp, criterion)
+                        val_loss = evaluate_depth(model, val_loader, device, amp, depth_loss)
 
                         '''
                         TENSORBOARD ADDITION
