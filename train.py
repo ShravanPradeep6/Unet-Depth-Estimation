@@ -15,15 +15,29 @@ from tqdm import tqdm
 from torch.utils.tensorboard import SummaryWriter #tensorboard import
 from datetime import datetime #tensorboard import
 
-import wandb
+#import wandb
 from evaluate import evaluate_depth #using evaluate_depth now
 from unet import UNet
 from utils.data_loading import BasicDataset, CarvanaDataset
 from utils.dice_score import dice_loss
 
+'''make conditional so can use in both colab and mac
 dir_img = Path('./depth_dataset/images/')
 dir_mask = Path('./depth_dataset/gt/')
 dir_checkpoint = Path('./checkpoints/')   # (or wherever you want)
+'''
+
+# Try local repo first, then Colab path
+if Path('./depth_dataset').exists():
+    base = Path('./depth_dataset')
+elif Path('/content/depth_dataset').exists():
+    base = Path('/content/depth_dataset')
+else:
+    raise FileNotFoundError("depth_dataset not found")
+
+dir_img = base / 'images'
+dir_mask = base / 'gt'
+dir_checkpoint = Path('./checkpoints')
 
 
 def train_model(
@@ -52,6 +66,7 @@ def train_model(
         dataset = BasicDataset(dir_img, dir_mask, img_scale)
     '''
     dataset = BasicDataset(dir_img, dir_mask, img_scale)
+
     #dataset = Subset(dataset, range(1000))
 
     # 2. Split into train / validation partitions
@@ -78,6 +93,7 @@ def train_model(
     run_name = f"unet_lr{learning_rate}_bs{batch_size}_{timestamp}"
     writer = SummaryWriter(log_dir=f"runs/{run_name}")
 
+    ''' WANDB not needed anymore
     # (Initialize logging)
     experiment = wandb.init(project='U-Net', resume='allow', anonymous='must')
  
@@ -85,6 +101,7 @@ def train_model(
         dict(epochs=epochs, batch_size=batch_size, learning_rate=learning_rate,
              val_percent=val_percent, save_checkpoint=save_checkpoint, img_scale=img_scale, amp=amp)
     )
+    '''
 
     logging.info(f'''Starting training:
         Epochs:          {epochs}
@@ -210,6 +227,7 @@ def train_model(
                 if global_step % 50 == 0:
                     writer.flush()
 
+                '''WANDB
                 # If you want the same metrics in wandb too:
                 experiment.log({
                     "grad/total_norm": total_grad_norm,
@@ -219,6 +237,7 @@ def train_model(
                     "step": global_step,
                     "epoch": epoch,
                 })
+                '''
                 # ---- END GRADIENT DIAGNOSTICS ----
                 '''END OF GRADIENT LOGGING'''
 
@@ -230,11 +249,13 @@ def train_model(
                 pbar.update(images.shape[0])
                 global_step += 1
                 epoch_loss += loss.item()
+                '''
                 experiment.log({
                     'train loss': loss.item(),
                     'step': global_step,
                     'epoch': epoch
                 })
+                '''
                 '''
                 TENSORBOARD ADDITION
                 '''
