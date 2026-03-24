@@ -177,6 +177,8 @@ def train_model(
     #criterion = nn.SmoothL1Loss()
     '''loss section is all moved below now, makes more sense'''
 
+    global_step = 0
+
     # 5. Begin training
     for epoch in range(1, epochs + 1):
         model.train()
