@@ -184,7 +184,7 @@ def train_model(
         model.train()
         epoch_loss = 0
         with tqdm(total=n_train, desc=f'Epoch {epoch}/{epochs}', unit='img') as pbar:
-            accum = 8
+            accum = 4
             optimizer.zero_grad(set_to_none=True)
             
             for batch in train_loader:
