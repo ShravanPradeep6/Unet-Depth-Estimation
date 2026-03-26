@@ -86,7 +86,7 @@ def depth_loss(pred, true_depth):
 
     grad = gradient_loss(pred, true_depth)
 
-    return base + 0.2 * grad
+    return base + 0.05 * grad
 '''END OF DEFINITIONS USED FOR LOSSES'''
 
 def train_model(
