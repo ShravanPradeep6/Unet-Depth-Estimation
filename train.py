@@ -86,7 +86,7 @@ def depth_loss(pred, true_depth):
 
     grad = gradient_loss(pred, true_depth)
 
-    return base + 0.1 * grad
+    return base + 0.2 * grad
 '''END OF DEFINITIONS USED FOR LOSSES'''
 
 def train_model(
@@ -184,7 +184,7 @@ def train_model(
         model.train()
         epoch_loss = 0
         with tqdm(total=n_train, desc=f'Epoch {epoch}/{epochs}', unit='img') as pbar:
-            accum = 1
+            accum = 8
             optimizer.zero_grad(set_to_none=True)
             
             for batch in train_loader:
