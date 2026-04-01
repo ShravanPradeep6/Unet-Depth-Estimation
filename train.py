@@ -86,7 +86,7 @@ def depth_loss(pred, true_depth):
 
     grad = gradient_loss(pred, true_depth)
 
-    return base + 0.05 * grad
+    return base + 0.02 * grad
 '''END OF DEFINITIONS USED FOR LOSSES'''
 
 def train_model(
@@ -332,6 +332,7 @@ def train_model(
                             if not (torch.isinf(value.grad) | torch.isnan(value.grad)).any():
                                 histograms['Gradients/' + tag] = wandb.Histogram(value.grad.data.cpu())
                         '''
+                        model.train()
                         val_loss = evaluate_depth(model, val_loader, device, amp)
 
                         '''

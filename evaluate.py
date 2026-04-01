@@ -80,8 +80,8 @@ def evaluate_depth(model, dataloader, device, amp, max_batches=20):
     total = 0.0
     n = 0
     for i, batch in enumerate(dataloader):
-        if i >= max_batches:
-            break
+        #if i >= max_batches:
+            #break
         images = batch['image'].to(device=device, dtype=torch.float32)
         true_depth = batch['depth'].to(device=device, dtype=torch.float32)
 
