@@ -40,9 +40,42 @@ def evaluate(net, dataloader, device, amp):
     return dice_score / max(num_val_batches, 1)
 '''
 
-#USING AVERAGE REGRESSION LOSS, SMOOTHL1 PIXEL BY PIXEL
+'''DEFINITIONS TO BE USED FOR LOSSES'''
+def gradient_x(img):
+    return img[:, :, :, :-1] - img[:, :, :, 1:]
+
+def gradient_y(img):
+    return img[:, :, :-1, :] - img[:, :, 1:, :]
+
+def gradient_loss(pred, target):
+    pred_dx = gradient_x(pred)
+    pred_dy = gradient_y(pred)
+
+    target_dx = gradient_x(target)
+    target_dy = gradient_y(target)
+
+    valid = (target > 0).float()
+
+    # gradient is valid only if both pixels involved are valid
+    valid_dx = valid[:, :, :, :-1] * valid[:, :, :, 1:]
+    valid_dy = valid[:, :, :-1, :] * valid[:, :, 1:, :]
+
+    loss_x = (torch.abs(pred_dx - target_dx) * valid_dx).sum() / (valid_dx.sum() + 1e-8)
+    loss_y = (torch.abs(pred_dy - target_dy) * valid_dy).sum() / (valid_dy.sum() + 1e-8)
+
+    return loss_x + loss_y
+def depth_loss(pred, true_depth):
+    valid = (true_depth > 0).float()
+
+    base_map = F.mse_loss(pred, true_depth, reduction='none')
+    base = (base_map * valid).sum() / (valid.sum() + 1e-8)
+
+    grad = gradient_loss(pred, true_depth)
+
+    return base + 0.01 * grad
+
 @torch.inference_mode()
-def evaluate_depth(model, dataloader, device, amp, criterion, max_batches=20): 
+def evaluate_depth(model, dataloader, device, amp, max_batches=20): 
     model.eval()
     total = 0.0
     n = 0
@@ -53,8 +86,8 @@ def evaluate_depth(model, dataloader, device, amp, criterion, max_batches=20):
         true_depth = batch['depth'].to(device=device, dtype=torch.float32)
 
         with torch.autocast(device.type if device.type != 'mps' else 'cpu', enabled=amp):
-            pred = torch.sigmoid(model(images))
-            loss = criterion(pred, true_depth)
+            pred = model(images)
+            loss = depth_loss(pred, true_depth)
 
         total += loss.item()
         n += 1

@@ -81,7 +81,7 @@ def gradient_loss(pred, target):
 def depth_loss(pred, true_depth):
     valid = (true_depth > 0).float()
 
-    base_map = F.smooth_l1_loss(pred, true_depth, reduction='none')
+    base_map = F.mse_loss(pred, true_depth, reduction='none')
     base = (base_map * valid).sum() / (valid.sum() + 1e-8)
 
     grad = gradient_loss(pred, true_depth)
@@ -332,7 +332,7 @@ def train_model(
                             if not (torch.isinf(value.grad) | torch.isnan(value.grad)).any():
                                 histograms['Gradients/' + tag] = wandb.Histogram(value.grad.data.cpu())
                         '''
-                        val_loss = evaluate_depth(model, val_loader, device, amp, depth_loss)
+                        val_loss = evaluate_depth(model, val_loader, device, amp)
 
                         '''
                         TENSORBOARD ADDITION
