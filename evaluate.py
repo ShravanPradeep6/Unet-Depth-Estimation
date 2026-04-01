@@ -76,7 +76,7 @@ def depth_loss(pred, true_depth):
 
 @torch.inference_mode()
 def evaluate_depth(model, dataloader, device, amp, max_batches=20): 
-    model.eval()
+    model.train() #MAYBE CHANGE BACK TO EVAL THO **
     total = 0.0
     n = 0
     for i, batch in enumerate(dataloader):
