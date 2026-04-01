@@ -86,7 +86,7 @@ def depth_loss(pred, true_depth):
 
     grad = gradient_loss(pred, true_depth)
 
-    return base + 0.01 * grad
+    return base + 0.05 * grad
 '''END OF DEFINITIONS USED FOR LOSSES'''
 
 def train_model(
@@ -233,6 +233,7 @@ def train_model(
 
                     pred = model(images)
                     loss = depth_loss(pred, true_depth)
+                    loss_to_log = loss.detach() #the loss we'll log in case we manipulate it later
 
                 ''' MAC CHANGE, MAKE EVERYTHING NO GRAD_SCALER
                 optimizer.zero_grad(set_to_none=True)
@@ -244,8 +245,8 @@ def train_model(
                 '''
                 #EVERYTHING BELOW IS WITH GRADSCALER
                 #optimizer.zero_grad(set_to_none=True)
-                loss = loss / accum
-                loss.backward()
+                (loss / accum).backward()
+                writer.add_scalar('Loss/train', loss_to_log.item(), global_step) #tensorboard training loss
                 ''' HUGE BLOCK TO LOG GRADIENTS ONTO TENSORBOARD AND VERIFY IF THEY'RE BIG OR SMALL'''
                 # ---- GRADIENT DIAGNOSTICS (drop-in) ----
                 import math
@@ -304,7 +305,7 @@ def train_model(
 
                 pbar.update(images.shape[0])
                 global_step += 1
-                epoch_loss += loss.item()
+                epoch_loss += loss_to_log.item()
                 '''
                 experiment.log({
                     'train loss': loss.item(),
@@ -315,7 +316,6 @@ def train_model(
                 '''
                 TENSORBOARD ADDITION
                 '''
-                writer.add_scalar('Loss/train', loss.item(), global_step) #tensorboard training loss
 
                 pbar.set_postfix(**{'loss (batch)': loss.item()})
 
