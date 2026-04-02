@@ -310,7 +310,7 @@ def train_model(
                         writer.add_scalar('LR', optimizer.param_groups[0]['lr'], global_step) #tensorboard
                         scheduler.step(val_loss) #schedule LR based on the validation loss
 
-                        ''' MIGHT'VE BEEN TAKING VALIDATION IMAGES INCORRECTLY
+                        
                         # pred and true_depth are [B,1,H,W] in [0,1]
                         pred_vis = pred[0]                       # [1,H,W]
                         true_vis = true_depth[0]                 # [1,H,W]
@@ -319,23 +319,13 @@ def train_model(
                         writer.add_image('Depth/true', true_vis, global_step)
                         writer.add_image('Depth/pred', pred_vis, global_step)
                         writer.add_image('Depth/abs_error', err_vis, global_step)
-                        '''
-
-                        val_batch = next(iter(val_loader))
-                        val_images = val_batch['image'].to(device=device, dtype=torch.float32)
-                        val_true = val_batch['depth'].to(device=device, dtype=torch.float32)
-
-                        with torch.no_grad():
-                            val_pred = model(val_images)
-
-                        writer.add_image('Depth/true', val_true[0], global_step)
-                        writer.add_image('Depth/pred', val_pred[0], global_step)
-                        writer.add_image('Depth/abs_error', (val_pred[0] - val_true[0]).abs(), global_step)
-
+                        
+            '''
             if global_step % accum != 0:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), gradient_clipping)
                 optimizer.step()
                 optimizer.zero_grad(set_to_none=True)
+            '''
 
             writer.add_scalar('Loss/train_epoch_avg', epoch_loss / len(train_loader), epoch) #epoch average training loss
 
