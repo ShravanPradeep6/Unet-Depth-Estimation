@@ -133,7 +133,7 @@ def train_model(
         pin_memory=pin_memory
     )
     train_loader = DataLoader(train_set, shuffle=True, **loader_args)
-    val_loader = DataLoader(val_set, shuffle=False, drop_last=True, **loader_args)
+    val_loader = DataLoader(val_set, shuffle=False, drop_last=False, **loader_args) #drop_last change (can revert)
 
     '''
     ADDITION FOR TENSORBOARD
@@ -284,20 +284,6 @@ def train_model(
                 if global_step % 50 == 0:
                     writer.flush()
 
-                '''WANDB
-                # If you want the same metrics in wandb too:
-                experiment.log({
-                    "grad/total_norm": total_grad_norm,
-                    "grad/max_abs": max_abs_grad,
-                    "grad/zero_fraction": zero_fraction,
-                    "grad/nonfinite_count": nonfinite_count,
-                    "step": global_step,
-                    "epoch": epoch,
-                })
-                '''
-                # ---- END GRADIENT DIAGNOSTICS ----
-                '''END OF GRADIENT LOGGING'''
-
                 if (global_step + 1) % accum == 0:
                     torch.nn.utils.clip_grad_norm_(model.parameters(), gradient_clipping)
                     optimizer.step()
@@ -306,43 +292,25 @@ def train_model(
                 pbar.update(images.shape[0])
                 global_step += 1
                 epoch_loss += loss_to_log.item()
-                '''
-                experiment.log({
-                    'train loss': loss.item(),
-                    'step': global_step,
-                    'epoch': epoch
-                })
-                '''
-                '''
-                TENSORBOARD ADDITION
-                '''
 
-                pbar.set_postfix(**{'loss (batch)': loss.item()})
+                pbar.set_postfix(**{'loss (batch)': loss_to_log.item()})
 
                 # Evaluation round
                 division_step = (n_train // (5 * batch_size))
                 if division_step > 0:
                     if global_step % division_step == 0:
-                        '''
-                        histograms = {}
-                        for tag, value in model.named_parameters():
-                            tag = tag.replace('/', '.')
-                            if not (torch.isinf(value) | torch.isnan(value)).any():
-                                histograms['Weights/' + tag] = wandb.Histogram(value.data.cpu())
-                            if not (torch.isinf(value.grad) | torch.isnan(value.grad)).any():
-                                histograms['Gradients/' + tag] = wandb.Histogram(value.grad.data.cpu())
-                        '''
-                        model.train()
+
                         val_loss = evaluate_depth(model, val_loader, device, amp)
 
                         '''
                         TENSORBOARD ADDITION
                         '''
-                        #writer.add_scalar('Dice/val', val_score, global_step)#tensorboard
+
                         writer.add_scalar('Loss/val', val_loss, global_step)
                         writer.add_scalar('LR', optimizer.param_groups[0]['lr'], global_step) #tensorboard
                         scheduler.step(val_loss) #schedule LR based on the validation loss
 
+                        ''' MIGHT'VE BEEN TAKING VALIDATION IMAGES INCORRECTLY
                         # pred and true_depth are [B,1,H,W] in [0,1]
                         pred_vis = pred[0]                       # [1,H,W]
                         true_vis = true_depth[0]                 # [1,H,W]
@@ -351,26 +319,25 @@ def train_model(
                         writer.add_image('Depth/true', true_vis, global_step)
                         writer.add_image('Depth/pred', pred_vis, global_step)
                         writer.add_image('Depth/abs_error', err_vis, global_step)
-
-                        ''' CAN'T USE ANYMORE, change wandb stuff later
-                        logging.info('Validation Dice score: {}'.format(val_score))
-                        try:
-                            experiment.log({
-                                'learning rate': optimizer.param_groups[0]['lr'],
-                                'validation Dice': val_score,
-                                'images': wandb.Image(images[0].cpu()),
-                                'masks': {
-                                    'true': wandb.Image(true_masks[0].float().cpu()),
-                                    'pred': wandb.Image(masks_pred.argmax(dim=1)[0].float().cpu()),
-                                },
-                                'step': global_step,
-                                'epoch': epoch,
-                                **histograms
-                            })
-                        except:
-                            pass
                         '''
 
+                        val_batch = next(iter(val_loader))
+                        val_images = val_batch['image'].to(device=device, dtype=torch.float32)
+                        val_true = val_batch['depth'].to(device=device, dtype=torch.float32)
+
+                        with torch.no_grad():
+                            val_pred = model(val_images)
+
+                        writer.add_image('Depth/true', val_true[0], global_step)
+                        writer.add_image('Depth/pred', val_pred[0], global_step)
+                        writer.add_image('Depth/abs_error', (val_pred[0] - val_true[0]).abs(), global_step)
+
+            if global_step % accum != 0:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), gradient_clipping)
+                optimizer.step()
+                optimizer.zero_grad(set_to_none=True)
+
+            writer.add_scalar('Loss/train_epoch_avg', epoch_loss / len(train_loader), epoch) #epoch average training loss
 
         if save_checkpoint:
             Path(dir_checkpoint).mkdir(parents=True, exist_ok=True)
