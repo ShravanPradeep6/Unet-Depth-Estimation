@@ -296,15 +296,12 @@ def train_model(
                 pbar.set_postfix(**{'loss (batch)': loss_to_log.item()})
 
                 # Evaluation round
+                '''
                 division_step = (n_train // (5 * batch_size))
                 if division_step > 0:
                     if global_step % division_step == 0:
 
                         val_loss = evaluate_depth(model, val_loader, device, amp)
-
-                        '''
-                        TENSORBOARD ADDITION
-                        '''
 
                         writer.add_scalar('Loss/val', val_loss, global_step)
                         writer.add_scalar('LR', optimizer.param_groups[0]['lr'], global_step) #tensorboard
@@ -319,6 +316,7 @@ def train_model(
                         writer.add_image('Depth/true', true_vis, global_step)
                         writer.add_image('Depth/pred', pred_vis, global_step)
                         writer.add_image('Depth/abs_error', err_vis, global_step)
+                        '''
                         
             '''
             if global_step % accum != 0:
@@ -326,9 +324,29 @@ def train_model(
                 optimizer.step()
                 optimizer.zero_grad(set_to_none=True)
             '''
+            val_loss = evaluate_depth(model, val_loader, device, amp)
+            writer.add_scalar('Loss/val', val_loss, global_step)
+            writer.add_scalar('LR', optimizer.param_groups[0]['lr'], global_step)
+            scheduler.step(val_loss)
 
-            writer.add_scalar('Loss/train_epoch_avg', epoch_loss / len(train_loader), epoch) #epoch average training loss
+            val_batch = next(iter(val_loader))
+            val_images = val_batch['image'].to(device=device, dtype=torch.float32)
+            val_true = val_batch['depth'].to(device=device, dtype=torch.float32)
 
+            model.eval()
+            with torch.no_grad():
+                val_pred = model(val_images)
+            model.train()
+
+            true_vis = val_true[0].detach().clamp(0, 1)
+            pred_vis = val_pred[0].detach().clamp(0, 1)
+            err_vis = (pred_vis - true_vis).abs().clamp(0, 1)
+
+            writer.add_image('Depth/true', true_vis, epoch)
+            writer.add_image('Depth/pred', pred_vis, epoch)
+            writer.add_image('Depth/abs_error', err_vis, epoch)
+
+            writer.add_scalar('Loss/train_epoch_avg', epoch_loss / len(train_loader), epoch)
         if save_checkpoint:
             Path(dir_checkpoint).mkdir(parents=True, exist_ok=True)
             state_dict = model.state_dict()
