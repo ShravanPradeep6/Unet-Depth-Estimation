@@ -205,35 +205,36 @@ def train_model(
                 #true_masks = true_masks.to(device=device, dtype=torch.long) CHANGED TO BELOW
                 true_depth = true_depth.to(device=device, dtype=torch.float32)
 
-
-                '''WHOLE SECTION CHANGED, REFERENCES TO MASK CHANGED TO TRUE_DEPTH, USES SIGMOID
-                with torch.autocast(device.type if device.type != 'mps' else 'cpu', enabled=amp):
-                    pred = torch.sigmoid(model(images)) #uses sigmoid activation
-                    if model.n_classes == 1:
-                        loss = criterion(pred, true_depth)
-                        #loss += dice_loss(F.sigmoid(masks_pred.squeeze(1)), true_masks.float(), multiclass=False)
-                    else: #shouldn't be triggered anyway .. wouldn't worry about it for now
-                        loss = criterion(pred, true_depth)
-                        loss += dice_loss(
-                            F.softmax(pred, dim=1).float(),
-                            F.one_hot(true_depth, model.n_classes).permute(0, 3, 1, 2).float(),
-                            multiclass=True
-                        )
-                    '''
                 #or actually don't even need that entier structure, classes should NEVER be more than 1
+                '''
                 with torch.autocast(device.type if device.type != 'mps' else 'cpu', enabled=amp):
-                    '''
+                    
                     pred = model(images)
 
                     valid = (true_depth > 0)  # ignore zero pixels
 
                     loss_map = F.smooth_l1_loss(pred, true_depth, reduction='none')
                     loss = (loss_map * valid).sum() / (valid.sum() + 1e-8)
-                    ''' #expanded upon in the function at top (depth_loss)
+                     #expanded upon in the function at top (depth_loss)
 
                     pred = model(images)
                     loss = depth_loss(pred, true_depth)
                     loss_to_log = loss.detach() #the loss we'll log in case we manipulate it later
+                    '''
+                
+                with torch.autocast(device.type if device.type != 'mps' else 'cpu', enabled=amp):
+                    pred = model(images)
+                    raw_loss = depth_loss(pred, true_depth)
+
+                # backward uses scaled loss
+                (raw_loss / accum).backward()
+
+                # logging uses real (unscaled) loss
+                writer.add_scalar('Loss/train', raw_loss.item(), global_step)
+
+                # for progress bar + epoch avg
+                epoch_loss += raw_loss.item()
+                pbar.set_postfix(**{'loss (batch)': raw_loss.item()})
 
                 ''' MAC CHANGE, MAKE EVERYTHING NO GRAD_SCALER
                 optimizer.zero_grad(set_to_none=True)
@@ -245,8 +246,7 @@ def train_model(
                 '''
                 #EVERYTHING BELOW IS WITH GRADSCALER
                 #optimizer.zero_grad(set_to_none=True)
-                (loss / accum).backward()
-                writer.add_scalar('Loss/train', loss_to_log.item(), global_step) #tensorboard training loss
+
                 ''' HUGE BLOCK TO LOG GRADIENTS ONTO TENSORBOARD AND VERIFY IF THEY'RE BIG OR SMALL'''
                 # ---- GRADIENT DIAGNOSTICS (drop-in) ----
                 import math
@@ -291,9 +291,6 @@ def train_model(
 
                 pbar.update(images.shape[0])
                 global_step += 1
-                epoch_loss += loss_to_log.item()
-
-                pbar.set_postfix(**{'loss (batch)': loss_to_log.item()})
 
                 # Evaluation round
                 '''
