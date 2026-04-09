@@ -41,14 +41,27 @@ dir_mask = base / 'gt'
 dir_checkpoint = Path('./checkpoints')
 '''
 
+
 PROJECT_ROOT = Path(__file__).resolve().parent
 
+repo_base = PROJECT_ROOT / 'depth_dataset'
+colab_base = Path('/content/depth_dataset')
+
+if (repo_base / 'images').exists() and (repo_base / 'gt').exists():
+    base = repo_base
+elif (colab_base / 'images').exists() and (colab_base / 'gt').exists():
+    base = colab_base
+else:
+    raise FileNotFoundError("depth_dataset with both images/ and gt/ not found")
+
+'''
 if (PROJECT_ROOT / 'depth_dataset').exists():
     base = PROJECT_ROOT / 'depth_dataset'
 elif Path('/content/depth_dataset').exists():
     base = Path('/content/depth_dataset')
 else:
     raise FileNotFoundError("depth_dataset not found")
+'''
 
 dir_img = base / 'images'
 dir_mask = base / 'gt'
